@@ -1,0 +1,192 @@
+#!/bin/bash
+
+# ========== Utils ==========
+
+usage()
+{
+    basename=$(basename $0)
+    cat <<EOF
+Usage:
+    \`$basename -h\`                Print usage
+    \`$basename --help\` 
+
+    \`$basename <file>\`            Display diff for managed file
+    \`$basename <file> -v\`         Display diff for managed file in vim
+
+    \`$basename <package> -l\`      List all modified files owned by <package>
+    \`$basename <package> -l -q\`   IDEM Machine-Readable
+    \`$basename <package> -l -v\`   IDEM Verbose
+
+    \`$basename <package>\`         Display all diffs for package
+    \`$basename <package> -v\`      Display each diff for package in vim successively
+
+    \`$basename -l\`                List ALL modified managed files sorted by packages
+    \`$basename -l -q\`             IDEM Machine-Readable
+    \`$basename -l -v\`             IDEM Verbose
+EOF
+}
+
+exit_or_return()
+{
+    if [ -z $1 ]
+    then
+        exit 1
+    else
+        return 1
+    fi
+}
+
+check_file_managed()
+{
+    # Check if file is ownwed by some package
+    if ! pacman -Qo "$1" >/dev/null 2>&1
+    then
+        if [ -z $2 ]
+        then
+            echo "ABORT: file $1 is not managed by system"
+        fi
+        exit_or_return $2
+    fi
+}
+check_file_exists()
+{
+    if [ ! -e "$1" ]
+    then
+        if [ -z $2 ]
+        then
+            echo "ABORT: file $1 does not exist in filesystem"
+        fi
+        exit_or_return $2
+    fi
+}
+check_pkg_installed()
+{
+    if ! pacman -Qi "$1" >/dev/null 2>&1
+    then
+        if [ -z $2 ]
+        then
+            echo "ABORT: package $1 is not installed"
+        fi
+        exit_or_return $2
+    fi
+}
+
+vim_or_diff()
+{
+    if [ "$2" = '-v' ]
+    then
+        vim_diff_file "$1"
+    else
+        diff_file "$1"
+    fi
+}
+
+list_package_modified()
+{
+    out="$(pacman -Qii $1 | rg '^MODIFIED' | awk '{print $2}')"
+    if [ -n "$out" ]
+    then
+        [ "$2" = '-pretty' ] && \
+            echo "=== Package: $1 ===" && \
+            out="$(cat <<<"$out" | awk '{print "M " $1}')" &&
+            # If verbose print output of pacman directly
+            [ "$3" = '-v' ] && \
+                    pacman -Qii $1 | rg -i 'modified' && \
+                    return
+        echo -e "$out"
+    fi
+}
+
+# ========== Features ==========
+
+# Output state of file in installed version of its owner package
+output_pkg_file()
+{
+    check_file_managed "$1"
+# |extract| |archive file| of |owner pkg|                                 |to stdout|
+    tar -xf "$(pacman -Sp "$(pacman -Qoq "$file")" | sed 's@^[^/]*//@@')" --to-stdout "${file#/}"
+}
+
+# Display Diff of package file in fs versus its original state in the (installed version of the) package
+diff_file()
+{
+    check_file_exists "$1"
+    check_file_managed "$1"
+    file="$(readlink -f "$1")"
+
+    diff <(output_pkg_file "$file") <(cat "$file")
+}
+
+# Open Diff Side-by-Side in Vim
+vim_diff_file()
+{
+    check_file_exists "$1"
+    check_file_managed "$1"
+    file="$(readlink -f "$1")"
+
+    vim -Od <(output_pkg_file "$file") <(cat "$file")
+}
+
+# Display Full Diff for Package
+diff_package()
+{
+    # List modified backup files of package
+    backup_files="$(list_package_modified $1)"
+    if [ -z "$backup_files" ]
+    then
+        echo "Finish: package $1 has not been modified"
+        exit 0
+    else
+        echo -e "$backup_files" | while read backup_file
+        do
+            echo "=== Diff ==="
+            echo "=== $backup_file ==="
+            echo "=== === ==="
+            vim_or_diff "$backup_file" $2
+        done
+    fi
+}
+
+# List Modified Files for All Packages
+list_all()
+{
+    pacman -Qq | while read package
+    do 
+        [ "$1" = '-q' ] && \
+            list_package_modified "$package" || \
+        ([ "$1" = '-v' ] && \
+            list_package_modified "$package" -pretty $1 || \
+        list_package_modified "$package" -pretty)
+    done
+}
+
+# ========== Run ==========
+
+if [ -z "$1" ] || [ "$1" = '-h' ] || [ "$1" = '--help' ]
+then
+    usage
+    exit 0
+elif [ "$1" = '-l' ]
+then
+    list_all $2
+    exit 0
+fi
+
+if check_file_exists "$1" -test
+then 
+    vim_or_diff "$@"
+else 
+    if check_pkg_installed "$1" -test
+    then 
+        [ "$2" = '-l' ] && \
+            ([ "$3" = '-q' ] && \
+                list_package_modified "$1" || \
+            ([ "$3" = '-v' ] && \
+                list_package_modified "$1" -pretty $3 || \
+            list_package_modified "$1" -pretty)
+            ) || \
+            diff_package $1 $2
+    else
+        echo "$1 isn't a file nor a package"
+    fi
+fi
